@@ -1,4 +1,4 @@
-package azadjwtvalidation
+package plugindemo
 
 import (
 	"encoding/json"

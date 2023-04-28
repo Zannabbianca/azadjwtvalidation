@@ -11,8 +11,8 @@ log:
 
 experimental:
   devPlugin:
-    goPath: /home/music-tribe/go/
-    moduleName: github.com/music-tribe/azadjwtvalidation
+    goPath: /home/traefik/go/
+    moduleName: traefik/plugindemo
 
 entryPoints:
   http:

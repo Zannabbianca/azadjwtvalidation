@@ -1,4 +1,4 @@
-module github.com/music-tribe/azadjwtvalidation
+module traefik/plugindemo
 
 go 1.19
 

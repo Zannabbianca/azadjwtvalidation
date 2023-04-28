@@ -1,10 +1,9 @@
-package azadjwtvalidation
+package plugindemo
 
 import (
+	"bytes"
 	"context"
-	"crypto"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -13,26 +12,33 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 var rsakeys map[string]*rsa.PublicKey
 
+type Post struct {
+	Id     int    `json:"id"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	UserId int    `json:"userId"`
+}
+
 type Config struct {
-	PublicKey     string
-	KeysUrl       string
-	Issuer        string
-	Audience      string
-	Roles         []string
-	MatchAllRoles bool
+	IntrospectionUrl     string
+	Id       string
+	Secret        string
 	LogLevel      string
 	LogHeaders    []string
 }
+
+type Values map[string][]string
+
+type Response map[string]interface{}
 
 type AzureJwtPlugin struct {
 	next   http.Handler
@@ -61,106 +67,83 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		LoggerDEBUG.SetOutput(os.Stdout)
 	}
 
-	if len(config.Audience) == 0 {
-		return nil, fmt.Errorf("configuration incorrect, missing audience")
-	}
-
-	if strings.TrimSpace(config.Issuer) == "" {
-		return nil, fmt.Errorf("configuration incorrect, missing issuer")
-	}
-
-	if strings.TrimSpace(config.KeysUrl) == "" && strings.TrimSpace(config.PublicKey) == "" {
-		return nil, fmt.Errorf("configuration incorrect, missing either a JWKS url or a static public key")
-	}
-
 	plugin := &AzureJwtPlugin{
 		next:   next,
 		config: config,
 	}
 
-	go plugin.scheduleUpdateKeys(config)
-
 	return plugin, nil
 }
 
 func (azureJwt *AzureJwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	
 	tokenValid := false
+	errMsg := ""
 
 	token, err := azureJwt.ExtractToken(req)
+	if err != nil {
+		http.Error(rw, "The token you provided is not valid. Please provide a valid token.", http.StatusForbidden)
+		return
+	}
 
-	if err == nil {
-		valerr := azureJwt.ValidateToken(token)
-		if valerr == nil {
-			LoggerDEBUG.Println("Accepted request")
-			tokenValid = true
-		} else {
-			LoggerWARN.Println(valerr)
-		}
+	posturl := azureJwt.config.IntrospectionUrl
+
+	// JSON body
+	bodyData := url.Values{}
+	bodyData.Set("token", string(token.RawToken))
+	encodedData := bodyData.Encode()
+
+	// Create a HTTP post request
+	r, err := http.NewRequest("POST", posturl, strings.NewReader(encodedData))
+	if err != nil {
+
+		panic(err)
+	}
+	var basic = "Basic "
+	var data = azureJwt.config.Id + ":" + azureJwt.config.Secret
+
+	sEnc := base64.StdEncoding.EncodeToString([]byte(data))
+
+	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Add("Content-Length", strconv.Itoa(len(bodyData.Encode())))
+	r.Header.Add("Accept", "*/*")
+	r.Header.Add("Connection", "keep-alive")
+	r.Header.Add("Authorization", basic + sEnc)
+
+	client := &http.Client{}
+	res, err := client.Do(r)
+	if err != nil {
+		errMsg = "Error encountered while making request."
+		LogHttp(LoggerWARN, err.Error(), azureJwt.config.LogHeaders, http.StatusForbidden, req)
+		panic(err)
+	}
+
+	defer res.Body.Close()
+
+	target := Response{}
+
+	derr := json.NewDecoder(res.Body).Decode(&target)
+	if derr != nil {
+		errMsg = "http request encountered an error. Go into panic."
+		LogHttp(LoggerWARN, derr.Error(), azureJwt.config.LogHeaders, http.StatusForbidden, req)
+		panic(derr)
+	}
+
+	if(target["active"].(bool)) { 
+		tokenValid = true
+		LogHttp(LoggerWARN, "Token is active! you shall pass.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
 	} else {
-		errMsg := ""
-
-		switch err.Error() {
-		case "no authorization header":
-			errMsg = "No token provided. Please use Authorization header to pass a valid token."
-		case "not bearer auth scheme":
-			errMsg = "Token provided on Authorization header is not a bearer token. Please provide a valid bearer token."
-		case "invalid token format":
-			errMsg = "The format of the bearer token provided on Authorization header is invalid. Please provide a valid bearer token."
-		case "invalid token":
-			errMsg = "The token provided is invalid. Please provide a valid bearer token."
-		}
-
-		LogHttp(LoggerWARN, errMsg, azureJwt.config.LogHeaders, http.StatusUnauthorized, req)
-		http.Error(rw, errMsg, http.StatusUnauthorized)
+		tokenValid = false
+		LogHttp(LoggerWARN, "Token is not active! you shall not pass.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
 	}
 
 	if tokenValid {
+		LogHttp(LoggerWARN, "Token is valid!", azureJwt.config.LogHeaders, http.StatusForbidden, req)
 		azureJwt.next.ServeHTTP(rw, req)
 	} else {
-		LogHttp(LoggerWARN, "The token you provided is not valid. Please provide a valid token.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
-		http.Error(rw, "The token you provided is not valid. Please provide a valid token.", http.StatusForbidden)
+		LogHttp(LoggerWARN, "The token you provided is not valid. Please provide a valid token. End.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
+		http.Error(rw, "The token you provided is not valid. Please provide a valid token. End.", http.StatusForbidden)
 	}
-}
-
-func (azureJwt *AzureJwtPlugin) scheduleUpdateKeys(config *Config) {
-	for {
-		_ = azureJwt.GetPublicKeys(config)
-		time.Sleep(15 * time.Minute)
-	}
-}
-
-func (azureJwt *AzureJwtPlugin) GetPublicKeys(config *Config) error {
-	verifyAndSetPublicKey(config.PublicKey)
-
-	if strings.TrimSpace(config.KeysUrl) != "" {
-		var body map[string]interface{}
-		resp, err := http.Get(config.KeysUrl)
-
-		if err != nil {
-			LoggerWARN.Println("failed to load public key from:", config.KeysUrl)
-			return fmt.Errorf("failed to load public key from:%v", config.KeysUrl)
-		} else {
-			json.NewDecoder(resp.Body).Decode(&body)
-			for _, bodykey := range body["keys"].([]interface{}) {
-				key := bodykey.(map[string]interface{})
-				kid := key["kid"].(string)
-				e := key["e"].(string)
-				rsakey := new(rsa.PublicKey)
-				number, _ := base64.RawURLEncoding.DecodeString(key["n"].(string))
-				rsakey.N = new(big.Int).SetBytes(number)
-
-				b, err := base64.RawURLEncoding.DecodeString(e)
-				if err != nil {
-					LoggerWARN.Println("Error parsing key E:", err)
-				}
-
-				rsakey.E = int(new(big.Int).SetBytes(b).Uint64())
-				rsakeys[kid] = rsakey
-			}
-		}
-	}
-
-	return nil
 }
 
 func verifyAndSetPublicKey(publicKey string) error {
@@ -238,91 +221,6 @@ func (azureJwt *AzureJwtPlugin) ExtractToken(request *http.Request) (*AzureJwt, 
 		return nil, errors.New("invalid token")
 	}
 	return &jwtToken, nil
-}
-
-func (azureJwt *AzureJwtPlugin) ValidateToken(token *AzureJwt) error {
-	hash := sha256.Sum256(token.RawToken)
-
-	if _, ok := rsakeys[token.Header.Kid]; !ok {
-		return errors.New("invalid public key")
-	}
-
-	err := rsa.VerifyPKCS1v15(rsakeys[token.Header.Kid], crypto.SHA256, hash[:], token.Signature)
-	if err != nil {
-		return err
-	}
-
-	if err := azureJwt.VerifyToken(token); err != nil {
-		return err
-	}
-
-	var claims Claims
-	if err := json.Unmarshal(token.RawPayload, &claims); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (azureJwt *AzureJwtPlugin) VerifyToken(jwtToken *AzureJwt) error {
-	tokenExpiration, err := jwtToken.Payload.Exp.Int64()
-	if err != nil {
-		return err
-	}
-
-	if tokenExpiration < time.Now().Unix() {
-		LoggerWARN.Println("Token has expired", time.Unix(tokenExpiration, 0))
-		return errors.New("token is expired")
-	}
-
-	err = azureJwt.validateClaims(&jwtToken.Payload)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (azureJwt *AzureJwtPlugin) validateClaims(parsedClaims *Claims) error {
-
-	if !strings.Contains(azureJwt.config.Audience, parsedClaims.Aud) {
-		// if parsedClaims.Aud != azureJwt.config.Audience {
-		return errors.New("token audience is wrong")
-	}
-
-	if parsedClaims.Iss != azureJwt.config.Issuer {
-		return errors.New("wrong issuer")
-	}
-
-	if parsedClaims.Roles != nil {
-		if len(azureJwt.config.Roles) > 0 {
-			var allRolesValid bool = true
-			if !azureJwt.config.MatchAllRoles {
-				allRolesValid = false
-			}
-
-			for _, role := range azureJwt.config.Roles {
-				roleValid := parsedClaims.isValidForRole(role)
-				if azureJwt.config.MatchAllRoles && !roleValid {
-					allRolesValid = false
-					break
-				}
-				if !azureJwt.config.MatchAllRoles && roleValid {
-					allRolesValid = true
-					break
-				}
-			}
-
-			if !allRolesValid {
-				LoggerWARN.Println("missing correct role, found: " + strings.Join(parsedClaims.Roles, ",") + ", expected: " + strings.Join(azureJwt.config.Roles, ","))
-				return errors.New("missing correct role")
-			}
-		}
-	} else if len(azureJwt.config.Roles) > 0 {
-		return errors.New("missing correct role")
-	}
-
-	return nil
 }
 
 func (claims *Claims) isValidForRole(configRole string) bool {
