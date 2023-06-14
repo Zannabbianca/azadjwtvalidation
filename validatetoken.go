@@ -1,4 +1,4 @@
-package plugindemo
+package introspectionPlugin
 
 import (
 	"bytes"
@@ -80,17 +80,21 @@ func (azureJwt *AzureJwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Requ
 	tokenValid := false
 	errMsg := ""
 
-	token, err := azureJwt.ExtractToken(req)
-	if err != nil {
-		http.Error(rw, "The token you provided is not valid. Please provide a valid token.", http.StatusForbidden)
+	posturl := azureJwt.config.IntrospectionUrl
+
+	reqToken := req.Header.Get("Authorization")
+	splitToken := strings.Split(reqToken, "Bearer ")
+
+	if len(splitToken) != 2 {
+		LogHttp(LoggerWARN, "Recieved a request without a valid token.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
+		http.Error(rw, "Please provide a valid token.", http.StatusForbidden)
 		return
 	}
-
-	posturl := azureJwt.config.IntrospectionUrl
+	reqToken = splitToken[1]
 
 	// JSON body
 	bodyData := url.Values{}
-	bodyData.Set("token", string(token.RawToken))
+	bodyData.Set("token", string(reqToken))
 	encodedData := bodyData.Encode()
 
 	// Create a HTTP post request
@@ -120,21 +124,20 @@ func (azureJwt *AzureJwtPlugin) ServeHTTP(rw http.ResponseWriter, req *http.Requ
 
 	defer res.Body.Close()
 
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		LogHttp(LoggerWARN, err.Error(), azureJwt.config.LogHeaders, http.StatusForbidden, req)
+	}
+	
 	target := Response{}
 
-	derr := json.NewDecoder(res.Body).Decode(&target)
-	if derr != nil {
-		errMsg = "http request encountered an error. Go into panic."
-		LogHttp(LoggerWARN, derr.Error(), azureJwt.config.LogHeaders, http.StatusForbidden, req)
-		panic(derr)
-	}
-
+	s := string(b)
+	json.Unmarshal([]byte(s), &target)
+	
 	if(target["active"].(bool)) { 
 		tokenValid = true
-		LogHttp(LoggerWARN, "Token is active! you shall pass.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
 	} else {
 		tokenValid = false
-		LogHttp(LoggerWARN, "Token is not active! you shall not pass.", azureJwt.config.LogHeaders, http.StatusForbidden, req)
 	}
 
 	if tokenValid {
@@ -215,11 +218,7 @@ func (azureJwt *AzureJwtPlugin) ExtractToken(request *http.Request) (*AzureJwt, 
 		fmt.Printf("JSON HEADER: %+v", err)
 		return nil, errors.New("invalid token")
 	}
-	err = json.Unmarshal(payload, &jwtToken.Payload)
-	if err != nil {
-		fmt.Printf("JSON PAYLOAD: %+v", err)
-		return nil, errors.New("invalid token")
-	}
+
 	return &jwtToken, nil
 }
 

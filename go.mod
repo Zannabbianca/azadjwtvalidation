@@ -1,4 +1,4 @@
-module traefik/plugindemo
+module traefik/introspectionPlugin
 
 go 1.19
 

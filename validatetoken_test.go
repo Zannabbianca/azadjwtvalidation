@@ -1,4 +1,4 @@
-package plugindemo
+package introspectionPlugin
 
 import (
 	"bytes"

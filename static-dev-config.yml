@@ -12,7 +12,7 @@ log:
 experimental:
   devPlugin:
     goPath: /home/traefik/go/
-    moduleName: traefik/plugindemo
+    moduleName: traefik/introspectionPlugin
 
 entryPoints:
   http:

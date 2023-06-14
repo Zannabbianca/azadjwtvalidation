@@ -8,7 +8,7 @@ http:
       entryPoints:
         - http
       middlewares:
-        - plugindemo
+        - introspectionPlugin
 
   services:
    service-whoami:
@@ -17,9 +17,9 @@ http:
           - url: http://127.0.0.1:5000
   
   middlewares:
-    plugindemo:
+    introspectionPlugin:
       plugin:
-        dev:
+        prod:
           keysurl: "https://jwks.keys"
           issuer: "https://issuer.test"
           audience: "audience1,audience2"
